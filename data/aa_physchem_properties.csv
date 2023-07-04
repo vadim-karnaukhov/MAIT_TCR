@@ -1,0 +1,61 @@
+amino.acid,variable,value
+A,basicity,206.4
+C,basicity,206.2
+D,basicity,208.6
+E,basicity,215.6
+F,basicity,212.1
+G,basicity,202.7
+H,basicity,223.7
+I,basicity,210.8
+K,basicity,221.8
+L,basicity,209.6
+M,basicity,213.3
+N,basicity,212.8
+P,basicity,214.4
+Q,basicity,214.2
+R,basicity,237
+S,basicity,207.6
+T,basicity,211.7
+V,basicity,208.7
+W,basicity,216.1
+Y,basicity,213.1
+A,hydrophobicity,-0.591
+C,hydrophobicity,-1.343
+D,hydrophobicity,1.05
+E,hydrophobicity,1.357
+F,hydrophobicity,-1.006
+G,hydrophobicity,-0.384
+H,hydrophobicity,0.336
+I,hydrophobicity,-1.239
+K,hydrophobicity,1.831
+L,hydrophobicity,-1.019
+M,hydrophobicity,-0.663
+N,hydrophobicity,0.945
+P,hydrophobicity,0.189
+Q,hydrophobicity,0.931
+R,hydrophobicity,1.538
+S,hydrophobicity,-0.228
+T,hydrophobicity,-0.032
+V,hydrophobicity,-1.337
+W,hydrophobicity,-0.595
+Y,hydrophobicity,0.26
+A,secondary structure propensity,-1.302
+C,secondary structure propensity,0.465
+D,secondary structure propensity,0.302
+E,secondary structure propensity,-1.453
+F,secondary structure propensity,-0.59
+G,secondary structure propensity,1.652
+H,secondary structure propensity,-0.417
+I,secondary structure propensity,-0.547
+K,secondary structure propensity,-0.561
+L,secondary structure propensity,-0.987
+M,secondary structure propensity,-1.524
+N,secondary structure propensity,0.828
+P,secondary structure propensity,2.081
+Q,secondary structure propensity,-0.179
+R,secondary structure propensity,-0.055
+S,secondary structure propensity,1.399
+T,secondary structure propensity,0.326
+V,secondary structure propensity,-0.279
+W,secondary structure propensity,0.009
+Y,secondary structure propensity,0.83

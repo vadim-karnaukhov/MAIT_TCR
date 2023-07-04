@@ -1,0 +1,1021 @@
+---
+title: "Untitled"
+author: "Vadim Karnaukhov"
+date: "28 02 2023"
+output: html_document
+---
+
+```{r}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(Seurat)
+library(patchwork)
+library(Biostrings)
+library(ggbeeswarm)
+library(igraph)
+library(stringdist)
+library(forcats)
+library(cowplot)
+library(ggpubr)
+```
+
+# Read the data
+```{r}
+mait.curie <- fread("data/MAIT_TCR_data.csv") 
+```
+
+# Filter the data
+
+## Number of detected TRA and TRB for each cell
+```{r}
+mait.nanb <- mait.curie %>% 
+  rowwise() %>% 
+  mutate(n.a = length(unlist(str_split(cdr3_a, ";"))),
+         n.b = length(unlist(str_split(cdr3_b, ";"))),
+         n.a.unique = length(unique(unlist(str_split(cdr3_a, ";")))),
+         n.b.unique = length(unique(unlist(str_split(cdr3_b, ";")))),
+         cdr3_a = replace_na(cdr3_a, "NA"),
+         cdr3_b = replace_na(cdr3_b, "NA"),
+         n.a = ifelse(cdr3_a == "NA", 0, n.a),
+         n.b = ifelse(cdr3_b == "NA", 0, n.b),
+         n.a.unique = ifelse(cdr3_a == "NA", 0, n.a.unique),
+         n.b.unique = ifelse(cdr3_b == "NA", 0, n.b.unique)) 
+```
+
+## Consider only cells with 1 TRA and 1 TRB
+```{r}
+cell_type.levels <- c("MAIT1", "MAIT17", "Cycling", "Intermediary", "Immature")
+
+mait.1a1b <- mait.nanb %>% 
+  filter(n.a.unique == 1 & n.b.unique == 1) %>% 
+  select(-n.a, -n.b, -n.a.unique, -n.b.unique) %>% 
+  mutate(mait1 = (cluster %in% c(4,5)),
+         mait17 = (cluster == 0),
+         cell_type = factor(cell_type, levels = cell_type.levels)) %>% 
+  filter(cdr3_a != "", cdr3_b != "")
+```
+
+## Number of cells per cluster per mouse
+```{r}
+cell_type.colors <- c("#ffc425", "#d11141", "#00b159", "grey50", "grey80")
+mait_colors <- c("#ffc425", "#d11141", "#f37735")
+
+mouse_tags <- tibble(hto_tag = c("D1", "D2", "D3", "ND1", "ND2", "ND3"),
+                     mouse = paste0("M", 1:6))
+
+pfig.ncells <- mait.1a1b %>% 
+  group_by(cell_type, hto_tag) %>% 
+  summarise(n = n()) %>% 
+  merge(mouse_tags) %>% 
+  ggplot(aes(x = cell_type, y = n, fill = mouse)) +
+  geom_bar(stat = "identity", color = "black") +
+  #scale_fill_manual("Mouse tag", values = c("#56B4E9", "#CC79A7", "#E69F00", "#009E73", "#D55E00", "#0072B2")) +
+  scale_fill_brewer("Mouse tag", palette = "Set2") +
+  ylab("Number of cells") + xlab("") +
+  theme_bw()  +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+pfig.ncells
+
+png(file="figures/pfig.ncells.png",width=8, height = 10, units = "cm", res = 500)
+pfig.ncells
+dev.off()
+```
+
+```{r}
+png(file="figures/pfig.ncells_total.png",width=4, height = 3, units = "in", res = 2000)
+mait.1a1b %>% 
+  group_by(cell_type) %>% 
+  summarise(n = n()) %>% 
+  ggplot(aes(x = cell_type, y = n, fill = cell_type)) +
+  geom_bar(stat = "identity", color = "black") +
+  scale_fill_manual(values = cell_type.colors) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  xlab("") + ylab("Number of cells")
+dev.off()
+```
+
+## Define clonotypes
+```{r}
+summarise_mait <- function(df) {
+  df %>%
+    summarise(n = n(),
+              mait1.s = sum(mait1),
+              mait17.s = sum(mait17),
+              type = ifelse(mait1.s > 0 & mait17.s > 0, "MAIT1-MAIT17",
+                            ifelse(mait1.s > 0, "MAIT1",
+                                   ifelse(mait17.s > 0, "MAIT17", "other"))),
+              type = factor(type, levels = c("MAIT1", "MAIT17", "MAIT1-MAIT17", "other"))) %>% 
+    ungroup()
+
+}
+
+
+mait.1a1b.clon <- mait.1a1b %>% 
+  group_by(cdr3_a, cdr3_b, v_gene_a, j_gene_a, v_gene_b, j_gene_b) %>% 
+  summarise_mait()
+```
+
+```{r}
+fig_clon_types <- mait.1a1b.clon %>% 
+  filter(n >= 2) %>% 
+  group_by(type) %>% 
+  summarise(n_clonotypes = n()) %>%
+  ungroup %>% 
+  mutate(fraction = n_clonotypes / sum(n_clonotypes),
+         csum = rev(cumsum(rev(fraction))), 
+         pos = fraction/2 + lead(csum, 1),
+         pos = if_else(is.na(pos), fraction/2, pos),
+         #midpoint = cumsum(fraction) - fraction / 2,
+         label = paste0(type, " (n = ", n_clonotypes, ")")) %>% 
+  ggplot(aes(x = "", y = fraction, fill = type)) +
+  geom_bar(stat = "identity", color = "white", position = "fill") +
+  coord_polar(theta = 'y') +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.ticks=element_blank(), 
+        axis.title=element_blank(), 
+        axis.text.y = element_blank(),
+        axis.text.x = element_blank(), 
+        panel.grid  = element_blank(),
+        panel.border = element_blank()) +
+  geom_text(aes(label = n_clonotypes),
+            position = position_stack(vjust = 0.5)) +
+  scale_fill_manual(values = c("#ffc425", "#d11141", "#f37735", "grey")) +
+  guides(fill=guide_legend(nrow = 2))
+
+png(file="figures/fig_clon_types.png",width=3,height = 3, units = "in", res = 1000)
+fig_clon_types
+dev.off()
+```
+
+
+## Distibution of clonotype size
+
+```{r}
+fig_clon_size <- mait.1a1b %>% 
+  mutate(label = paste0(cdr3_a, "_", cdr3_b)) %>% 
+  group_by(label) %>% 
+  mutate(total.cells = n()) %>% 
+  filter(total.cells > 2) %>% 
+  ggplot(aes(x = forcats::fct_reorder(label, total.cells, min), y = 1, fill = cell_type)) +
+  geom_bar(stat = "identity", position = position_stack(reverse = TRUE), color = "black") +
+  scale_fill_manual("MAIT subset", values = cell_type.colors) +
+  theme(aspect.ratio = 1,
+        legend.position = "rigth",
+        axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  theme_bw() +
+  scale_x_discrete(labels = NULL, breaks = NULL) +
+  xlab("Clonotype") + ylab("Cells") +
+  theme(legend.position = "bottom")
+
+fig_clon_size
+
+png(file="figures/fig_clon_size.png",width=9,height = 2, units = "in", res = 1000)
+fig_clon_size
+dev.off()
+```
+
+# Expansions in clusters 
+
+```{r}
+mait.expansion <- c(1:50) %>% 
+  lapply(function (x) {
+    mait.1a1b %>% 
+      filter(!hto_tag %in% c("D2", "D3")) %>% 
+      group_by(cell_type, hto_tag) %>% 
+      sample_n(size = 43) %>% 
+      group_by(cdr3_a, cdr3_b, cell_type, hto_tag) %>% 
+      summarise(n.cells = n()) %>% 
+      group_by(cell_type, hto_tag) %>% 
+      summarise(mean.size = sum(n.cells) / n(),
+                rep = x)
+  }) %>% 
+  rbindlist() %>% 
+  group_by(cell_type, hto_tag) %>% 
+  summarise(mean.size = mean(mean.size))
+```
+
+```{r, fig.width=4, fig.height=3}
+fig.mait.expansion <- mait.expansion %>% 
+  mutate(cell_type = factor(cell_type, 
+                            levels = c("MAIT1", "MAIT17", "Cycling", "Intermediary", "Immature"))) %>%
+  ggplot(aes(x = cell_type, y = mean.size, fill = cell_type, color = cell_type)) +
+  stat_summary(fun = "mean", geom = "crossbar", width = 0.5, color = "black") +
+  geom_beeswarm(shape = 21, size = 2, color = "black") +
+  theme_bw() +
+  scale_fill_manual("", values = cell_type.colors) +
+  scale_color_manual("", values = cell_type.colors) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        legend.position = "none") +
+  xlab("") + ylab("Expansion index")
+
+png(file="figures/fig.mait.expansion.png", width=4, height = 3, units = "in", res = 2000)
+fig.mait.expansion
+dev.off()
+```
+
+# Compare with Lee 
+
+Prepare the data
+```{r}
+mait.lee <- fread("data/Lee2020_MAIT.tsv") %>%   
+  mutate(cdr3_a = str_split_fixed(TRA_cdr3, "-", 2)[,1],
+         cdr3_b = str_split_fixed(TRB_cdr3, "-", 2)[,1],
+         v_gene_a = str_split_fixed(TRA_v_gene, "\\*", 2)[,1],
+         j_gene_a = str_split_fixed(TRA_j_gene, "\\*", 2)[,1],
+         v_gene_b = str_split_fixed(TRB_v_gene, "\\*", 2)[,1],
+         j_gene_b = str_split_fixed(TRB_j_gene, "\\*", 2)[,1]) %>% 
+  mutate(group = gsub("\\,S1$", "", subcelltype),
+         group = gsub("\\,S2$", "", group),
+         group = gsub("S1\\,", "", group),
+         group = gsub("S2\\,", "", group),
+         group = gsub("S1", "", group),
+         group = gsub("S2", "", group),
+         group = ifelse(group == "", "other", group),
+         group = ifelse(group == "MAIT17,MAIT1", "MAIT1-MAIT17", group)) %>% 
+  select(group, n, cdr3_a, cdr3_b, v_gene_a, j_gene_a, v_gene_b, j_gene_b)
+```
+
+
+```{r}
+mait.curie_lee <- merge(
+  mait.1a1b.clon %>% 
+    ungroup %>% 
+    mutate(dataset = "Curie") %>% 
+    select(v_gene_a, cdr3_a, v_gene_b, cdr3_b, group_Curie = type, n_Curie = n) %>% 
+    distinct(),
+  mait.lee %>%
+    mutate(dataset = "Lee") %>% 
+    select(v_gene_a, cdr3_a, v_gene_b, cdr3_b, group_Lee = group, n_Lee = n) %>% 
+    mutate(group_Lee = factor(group_Lee, levels = c("MAIT1", "MAIT17", "MAIT1-MAIT17", "other")))
+)
+
+fig.curie_lee <- mait.curie_lee %>% 
+  group_by(group_Curie, group_Lee) %>% 
+  summarise(n.clonotypes = n()) %>% 
+  ggplot(aes(x = group_Curie, y = n.clonotypes, fill = group_Lee)) +
+  geom_bar(stat = "identity", position = position_stack(reverse = TRUE)) +
+  scale_fill_manual("Subset in Lee data", values = c("#ffc425", "#d11141", "#f37735", "grey")) +
+  theme_bw() +
+  theme(aspect.ratio = 1) +
+  ylab("Number of clonotypes") + xlab("Subset in our data") +
+  theme(axis.text.x = element_text(colour = c("#e69f00", "#d11141", "#f37735", "grey40"),
+                                   size = 11, face="bold"))
+
+png(file="figures/fig_curie_lee.png",width=6,height = 6, units = "in", res = 500)
+fig.curie_lee
+dev.off()
+```
+
+## Simulation
+
+```{r}
+mait.curie_lee.sim <- c(1:1000) %>% 
+  lapply(function(x) {
+    mait.curie_lee %>% 
+      mutate(group_Lee = sample(group_Lee)) %>% 
+      filter(group_Curie %in% c("MAIT1", "MAIT17"),
+             group_Lee %in% c("MAIT1", "MAIT17")) %>% 
+      mutate(dif.subset = (group_Curie != group_Lee)) %>% 
+      summarise(n.dif.subset = sum(dif.subset)) %>% 
+      mutate(replica = 1)
+  }) %>% 
+  rbindlist()  
+```
+
+```{r, fig.width=2.5, fig.height=3}
+fig.mait.curie_lee.sim <- mait.curie_lee.sim %>% 
+  ggplot(aes(x = n.dif.subset)) +
+  geom_density(fill = "#f37735", bw = 2) +
+  geom_vline(xintercept = 13, color = "black", linetype = "dashed", size = 1) +
+  theme_bw() +
+  xlab("# clonotypes, MAIT1 in one dataset\n and MAIT17 in the other") +
+  ylab("Density") +
+  theme(axis.title.x = element_text(size = 9)) + 
+  xlim(c(0,20))
+
+png(file="figures/fig_sim_curie_lee.png",width=2.5,height = 2, units = "in", res = 2000)
+fig.mait.curie_lee.sim
+dev.off()
+```
+
+# Physico-chemical properties
+
+```{r}
+sethna <- rbind(
+  mait.1a1b.clon %>% 
+    filter(type %in% c("MAIT1","MAIT17")) %>% 
+    select(cdr3_b, type),
+  fread("data/sethna_noVJ.csv", header = F) %>% 
+    select(cdr3_b = V1)  %>%
+    mutate(type = "control") %>%  
+    select(cdr3_b, type) %>% 
+    sample_n(10000),
+  fread("data/chudakov_noVJ.csv", header = F) %>% 
+    select(cdr3_b = V1)  %>%
+    mutate(type = "control Chudakov") %>%  
+    select(cdr3_b, type) %>% 
+    sample_n(10000)
+) %>% 
+  distinct() %>% 
+  mutate(cdr3_b.len = nchar(cdr3_b))
+
+tcr.physchem <- sethna %>% 
+  filter(cdr3_b.len %in% c(12:16)) %>% 
+  select(cdr3_b, type, cdr3_b.len) %>% 
+  separate(cdr3_b, into = as.character(1:max(sethna$cdr3_b.len)), sep = 1:max(sethna$cdr3_b.len), remove = F) %>% 
+  melt(id = c("cdr3_b", "type", "cdr3_b.len"), variable.name = "position", value.name = "amino.acid") %>% 
+  filter(amino.acid != "") %>% 
+  mutate(position  = as.integer(position),
+         pos.cent = position - round(cdr3_b.len / 2, 0)) %>% 
+  merge(fread("data/aa_physchem_properties.csv")) %>% 
+  group_by(type, pos.cent, variable) %>% 
+  summarise(value.mean = mean(value))
+```
+
+```{r, fig.width=3.5, fig.height=5}
+pfig.tcr.physchem <- tcr.physchem %>% 
+  filter(type != "control Chudakov") %>% 
+  ggplot(aes(x = pos.cent, y = value.mean, color = type, group = type)) +
+  geom_line(color = "black", size = 1) +
+  geom_line(size = .7) +
+  theme_bw() +
+  scale_color_manual("", values = c("#ffc425", "#d11141", "blue")) +
+  xlab("Position relative to the center of CDR3b") + ylab("mean value") +
+  facet_wrap(~variable, scales = "free_y", ncol = 1) +
+  theme(legend.position = "bottom")
+
+pfig.tcr.physchem
+
+png(file="figures/pfig.tcr.physchem.png",width=3.5,height = 5, units = "in", res = 500)
+pfig.tcr.physchem
+dev.off()
+```
+## Repeat with control from Chudakov lab
+```{r, fig.width=8, fig.height=2.5}
+pfig.tcr.physchem.suppl <- tcr.physchem %>% 
+  filter(type != "control") %>%
+  ggplot(aes(x = pos.cent, y = value.mean, color = type, group = type)) +
+  geom_line(color = "black", size = 1.2) +
+  geom_line(size = .75) +
+  theme_bw() +
+  scale_color_manual("", values = c("#ffc425", "#d11141", "blue")) +
+  xlab("Position relative to the center of CDR3b") + ylab("mean value") +
+  facet_wrap(~variable, scales = "free_y", nrow = 1) +
+  theme(legend.position = "bottom")
+
+pfig.tcr.physchem.suppl
+
+png(file="figures/pfig.tcr.physchem_suppl.png",width=8,height = 2.5, units = "in", res = 500)
+pfig.tcr.physchem.suppl
+dev.off()
+```
+
+# MAIT1-MAIT17
+
+## CDR3a seq
+```{r, fig.width=5, fig.height=3.5}
+mait.cdr3a <- mait.1a1b.clon %>% 
+  filter(type != "other") %>% 
+  group_by(type, cdr3_a) %>% 
+  summarise(n = n()) %>% 
+  merge(expand.grid(type = c("MAIT1", "MAIT17", "MAIT1-MAIT17"),
+                    cdr3_a = unique(mait.1a1b.clon$cdr3_a)),
+        all = T) %>% 
+  mutate(n = replace_na(n, 0)) %>% 
+  group_by(type) %>% 
+  mutate(fraction = n / sum(n))
+
+levels_cdr3a <- mait.cdr3a %>% group_by(cdr3_a) %>% filter(type != "other") %>% summarise(s = sum(fraction)) %>% arrange(-s) %>% .$cdr3_a %>% .[1:10] %>% c(., "other")
+
+fig.mait.cdr3a <- mait.cdr3a %>% 
+  mutate(cdr3_a = factor(cdr3_a, levels = levels_cdr3a),
+         cdr3_a = replace_na(cdr3_a, "other")) %>% 
+  ggplot(aes(x = factor(cdr3_a, levels = levels_cdr3a), y = fraction, fill = type)) +
+  geom_bar(stat = "identity", position = position_dodge(), color = "black") +
+  theme_bw() +
+  theme(legend.position = c(.87, .78),
+        legend.background = element_blank(),
+        legend.text = element_text(size = 8),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  xlab("") +
+  scale_fill_manual("Subset", values = c("#ffc425", "#d11141", "#f37735")) +
+  ylim(c(0,1))
+
+png(file="figures/fig_cdr3a.png",width=5,height = 3.5, units = "in", res = 2000)
+fig.mait.cdr3a
+dev.off()
+```
+
+## CDR3b len
+```{r}
+fig_cdr3b_length <- mait.1a1b.clon %>% 
+  filter(type != "other") %>% 
+  mutate(cdr3_b.len = nchar(cdr3_b),
+         cdr3_b.bin = ifelse(cdr3_b.len <= 14, "short (10-14)", "long (15-18)"),
+         cdr3_b.bin = factor(cdr3_b.bin, levels = c("short (10-14)", "long (15-18)"))) %>% 
+  group_by(type, cdr3_b.bin) %>% 
+  summarise(n = n()) %>% 
+  mutate(n = replace_na(n, 0)) %>% 
+  group_by(type) %>% 
+  mutate(p = n / sum(n),
+         sd = sqrt(p * (1 - p) / sum(n))) %>% 
+  ggplot(aes(x = cdr3_b.bin, y = p, fill = type)) +
+  geom_bar(stat = "identity", position = position_dodge(), color = "black") +
+  geom_errorbar(aes(ymin = p - sd, ymax = p + sd),
+                position = position_dodge(width=0.9), width = 0.25) +
+  theme_bw() +
+  theme(legend.position = c(.8, .83),
+        legend.background = element_blank(),
+        legend.text = element_text(size = 8)) +
+  xlab("") +
+  scale_fill_manual("Subset", values = c("#ffc425", "#d11141", "#f37735", "grey")) +
+  theme(aspect.ratio = 1,
+        axis.text = element_text(colour = "black")) +
+  ylab("Fraction") + xlab("CDR3b length")
+
+png(file="figures/fig_cdr3b_length.png",width=4.5,height = 3.5, units = "in", res = 2000)
+fig_cdr3b_length
+dev.off()
+```
+
+
+
+# Explore clones
+```{r}
+mait.1a1b.clones <- mait.1a1b %>% 
+  group_by(v_gene_a, v_gene_b, cdr3_a, cdr3_b, cdr3_nt_a, cdr3_nt_b, hto_tag) %>% 
+  summarise_mait()
+```
+
+```{r, fig.width=12.5, fig.height=1.9}
+mait.1a1b.clones_for_fig <- mait.1a1b %>% 
+  merge(mait.1a1b.clones %>% 
+          select(cdr3_nt_a, cdr3_nt_b, hto_tag, type)) %>% 
+  group_by(cdr3_nt_a, cdr3_nt_b, hto_tag) %>% 
+  mutate(total = n()) %>% 
+  arrange(total, cdr3_nt_a, cdr3_nt_b) %>% 
+  filter(total >= 2,
+         type != "other") %>% 
+  mutate(label = paste(cdr3_nt_a, cdr3_nt_b, hto_tag, sep = "_"),
+         label = factor(label, levels = unique(label)),
+         cell_type = factor(cell_type, levels = cell_type.levels))
+
+labels_clones <- mait.1a1b.clones_for_fig %>% 
+  .$label %>% unique() 
+
+pfig.clones <- mait.1a1b.clones_for_fig %>% 
+  #ggplot(aes(x = forcats::fct_reorder(label, total, max), y = 1, fill = cell_type)) +
+  ggplot(aes(x = factor(label, levels = labels_clones), y = 1, fill = cell_type)) +
+  geom_bar(stat = "identity", color = "black") +
+  theme_bw() +
+  theme(axis.text.x=element_blank()) +
+  facet_grid(.~type, scales = "free_x", space='free') +
+  scale_x_discrete(breaks = NULL) +
+  theme(legend.position = "bottom") +
+  xlab("") + ylab("Number of cells") +
+  scale_fill_manual("MAIT subset", values = cell_type.colors)
+
+png(file="figures/pfig_clones.png",width=12.5,height = 1.9, units = "in", res = 1000)
+pfig.clones
+dev.off()
+```
+
+```{r, fig.height=1.1, fig.width=12.5}
+pfig.clones_tags <- mait.1a1b.clones_for_fig %>% 
+  select(label, hto_tag, type) %>% 
+  merge(mouse_tags) %>% 
+  ggplot(aes(x = factor(label, levels = labels_clones), y = 1, fill = mouse)) +
+  geom_tile(color = "black") +
+  facet_grid(.~type, scales = "free_x", space='free') +
+  theme_minimal() +
+  scale_fill_brewer("Mouse tag", palette = "Set2") +
+  theme(axis.title.x = element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        strip.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(legend.position = "bottom") +
+  guides(fill=guide_legend(nrow = 1))
+
+png(file="figures/pfig_clones_tags.png",width=12.5,height = 1.1, units = "in", res = 2000)
+pfig.clones_tags
+dev.off()
+``` 
+
+
+# UMAP
+
+```{r}
+tcr <- readRDS("Anne-Laure/MAITS.umis_6_vst.sans_neg_hto_personalized_tag_sans-neg-mt_10_features_1200_ncount_0_avec_et_sans_TCR_res0.5_clonotype_tcr_subcluster_immature.rds")
+
+umap.coord <- tcr[["umap"]]@cell.embeddings %>% 
+  as.data.frame() %>% 
+  rownames_to_column("barcode") %>%
+  merge(tcr@meta.data %>% 
+          select(cdr3_nt_a, cdr3_nt_b, cdr3_a, cdr3_b,
+                 v_gene_a, v_gene_b, j_gene_a, j_gene_b, hto_tag = hto.tag, cluster = seurat_clusters) %>%
+          rownames_to_column("barcode"))
+
+col_vector <- c(DiscretePalette(32, palette = "glasbey"), DiscretePalette(26, palette = "alphabet"), DiscretePalette(26, palette = "alphabet2"))
+
+mait.1a1b.clones.big <- mait.1a1b.clones %>%
+  filter((type %in% c("MAIT1", "MAIT17") & n >= 3) | 
+           (type %in% c("MAIT1-MAIT17") & n >= 2)) %>%
+  select(cdr3_nt_a, cdr3_nt_b, cdr3_a, cdr3_b, 
+         v_gene_a, v_gene_b, hto_tag, type, n) %>% 
+  mutate(label = paste(cdr3_nt_a, cdr3_nt_b, v_gene_a, v_gene_b, hto_tag, sep = "_"))
+```
+
+## Plot full UMAP
+
+```{r}
+theme_umap <- list(theme_minimal(),
+                   theme(axis.line = element_line(),
+                         panel.grid.major = element_blank(),
+                         panel.grid.minor = element_blank(),
+                         panel.border = element_blank(),
+                         panel.background = element_blank(),
+                         plot.title = element_text(hjust = 0.5),
+                         aspect.ratio = 1))
+
+umap.mait <- umap.coord %>% 
+  merge(tibble(cluster = c(0:6),
+               cell_type = c("MAIT17", "Intermediary", "Immature", "Cycling",
+                             "MAIT1", "MAIT1", "Cycling"))) %>% 
+  merge(tibble(cell_type = cell_type.levels,
+               color = cell_type.colors)) %>% 
+  filter(!((cell_type == "MAIT1") & ((UMAP_2 > 1) | (UMAP_1 < 0.5))),
+         !((cell_type == "MAIT17") & (UMAP_1 > -4))) %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2, color = cell_type)) +
+  geom_point(size = .7) +
+  #geom_point(shape = 1, color = "black", size = .9) +
+  scale_color_manual("MAIT cell subset", values = cell_type.colors, 
+                     limits = cell_type.levels) +
+  theme_umap +
+  theme(legend.position = "right")
+
+png(file="figures/pfig_umap.png",width=4,height = 3, units = "in", res = 1000)
+umap.mait
+dev.off()
+```
+## UMAP for clones
+```{r}
+plot_umap_clones <- function(.type) {
+  mait.1a1b.clones.f <- mait.1a1b.clones.big %>% 
+    filter(type == .type) %>% 
+    arrange(-n) %>% 
+    mutate(color = col_vector[row_number()])
+  
+  color_grey <- "grey85"
+    
+  mait.1a1b.clones.umap <- umap.coord %>% 
+    merge(mait.1a1b.clones.f,
+          all.x = T) %>% 
+    mutate(type = replace_na(type, "other"),
+           label = replace_na(label, "other"),
+           color = replace_na(color, color_grey))
+  
+  mait.1a1b.clones.umap %>% 
+    ggplot(aes(x = UMAP_1, y = UMAP_2, color = color)) +
+    geom_point(data = mait.1a1b.clones.umap %>% filter(color == color_grey), size = .9) +
+    geom_point(data = mait.1a1b.clones.umap %>% filter(color != color_grey), shape = 19, size = .9) +
+    geom_point(data = mait.1a1b.clones.umap %>% filter(color != color_grey), shape = 1, color = "black", size = .9) +
+    scale_color_manual(values = c(mait.1a1b.clones.f$color, color_grey), 
+                       limits = c(mait.1a1b.clones.f$color, color_grey)) +
+    ggtitle(.type) +
+    theme_umap +
+    theme(legend.position = NaN)
+}
+
+umap.mait1 <- plot_umap_clones("MAIT1")
+umap.mait17 <- plot_umap_clones("MAIT17")
+umap.mait1_mait17 <- plot_umap_clones("MAIT1-MAIT17")
+
+png(file="figures/pfig_umap_clones.png",width=9,height = 3, units = "in", res = 1000)
+ggdraw() +
+  draw_plot(umap.mait1, width = .33) +
+  draw_plot(umap.mait17, x = .33, width = .33) +
+  draw_plot(umap.mait1_mait17, x = .66, width = .33)
+dev.off()
+
+```
+
+# Clones within clonotype
+
+```{r, fig.width=3.4, fig.height=5}
+mait.1a1b.clones.for_plot <- mait.1a1b.clones %>% 
+  filter(type %in% c("MAIT1", "MAIT17")) %>% 
+  group_by(cdr3_a, cdr3_b) %>% 
+  mutate(n.clones = n()) %>% 
+  filter(n.clones >= 2) %>% 
+  arrange(-n.clones, cdr3_a, cdr3_b) %>% 
+  mutate(label = paste0(cdr3_a, "_", cdr3_b)) %>% 
+  mutate(label = factor(label, levels = unique(.$label)))
+
+mait.1a1b.clones.for_plot %>% 
+  arrange(-n.clones) %>% 
+  distinct(cdr3_a, cdr3_b) %>% 
+  fwrite("figures/z/fig2c_names.csv")
+
+mait.1a1b.clones.plot <- mait.1a1b.clones.for_plot %>% 
+  #ggplot(aes(x = forcats::fct_reorder(label, total, max), y = n, fill = cell_type)) +
+  #ggplot(aes(x = forcats::fct_reorder(label, n.clones, max), y = 1, fill = type)) +
+  ggplot(aes(x = label, y = 1, fill = type)) +
+  geom_bar(stat = "identity", color = "black") +
+  theme_bw() +
+  scale_fill_manual("Clone subset", values = c(mait_colors[1:2])) +
+  theme(#axis.text.x = element_text(hjust = 1, angle = 60),
+        legend.position = "bottom",
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank()) +
+  xlab("Clonotype aa sequence") + ylab("Clones (nt)") +
+  coord_flip() +
+  scale_x_discrete(limits=rev)
+
+mait.1a1b.clones.plot
+
+png(file="figures/pfig.tcr.clones.png", width=3.4, height = 5, units = "in", res = 500)
+ggdraw() +  
+  draw_plot(mait.1a1b.clones.plot + 
+              theme(legend.position = "none"), 
+            x = 0, y = .1, width = 1, height = 0.9) +
+  draw_plot(get_legend(mait.1a1b.clones.plot), 
+            x = 0, y = 0, width = 1, height = 0.1)
+dev.off()
+```
+
+```{r, fig.width=3.4, fig.height=5}
+ggdraw() +  
+  draw_plot(p + theme(legend.position = "none"), x = 0, y = .1, width = 1, height = 0.9) +
+  draw_plot(get_legend(p), x = 0, y = 0, width = 1, height = 0.1)
+
+```
+
+## Simulation 
+```{r, fig.width=2.5, fig.height=2}
+sim.clon_clonotype <- c(1:1000) %>% 
+  lapply(function (x) {
+    mait.1a1b.clones.for_plot %>% 
+      filter(type %in% c("MAIT1", "MAIT17")) %>% 
+      ungroup %>% 
+      mutate(type = sample(type)) %>% 
+      group_by(cdr3_a, cdr3_b) %>% 
+      summarise(n.type = length(unique(type))) %>% 
+      filter(n.type == 2) %>% 
+      mutate(rep = x) %>% 
+      group_by(rep) %>% 
+      summarise(n = n())
+  }) %>% 
+  rbindlist() 
+
+fig.sim.clon_clonotype <- sim.clon_clonotype %>% 
+  ggplot(aes(x = n)) +
+  geom_density(fill = "#f37735") +
+  geom_vline(xintercept = 15, color = "black", linetype = "dashed", size = 1) +
+  theme_bw() +
+  xlim(c(0,25)) +
+  xlab("# mixed clonotypes")
+
+fig.sim.clon_clonotype
+```
+
+```{r, fig.width=2.5, fig.height=3}
+png(file="figures/fig_sim_clon_clonotype.png",width=2.5,height = 2, units = "in", res = 2000)
+fig.sim.clon_clonotype
+dev.off()
+```
+
+
+
+## Pgens for MAIT1-MAIT17 clones 
+
+```{r}
+mait.1a1b.clones.pgen <- mait.1a1b.clones %>% 
+  merge(fread("data/pgen_TRA.tsv") %>% 
+          select(cdr3_nt_a = V1, pgen.TRA = V2) %>% 
+          distinct()) %>% 
+  merge(fread("data/pgen_TRB.tsv") %>% 
+          select(cdr3_nt_b = V1, pgen.TRB = V2) %>% 
+          distinct()) %>% 
+  mutate(pgen = pgen.TRA * pgen.TRB,
+         label = paste0(cdr3_nt_a, "_", cdr3_nt_b))
+```
+
+```{r, fig.width=4, fig.height=3}
+mait.1a1b.clones.pgen %>% 
+  ggplot(aes(x = type, y = pgen)) +
+  geom_quasirandom() +
+  geom_boxplot(color = "red", alpha = 0) +
+  scale_y_log10() +
+  theme_bw() +
+  ylab("Pgen") + xlab("") +
+  ggtitle("Clones (nt)") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+mait.1a1b.clones.pgen %>% 
+  filter(type == "MAIT1-MAIT17") %>% 
+  .$pgen %>% max
+```
+
+# Pgens for clonotypes
+
+```{r}
+mait.1a1b.clonotypes.pgen <- mait.1a1b.clones %>% 
+  filter(type %in% c("MAIT1", "MAIT17", "MAIT1-MAIT17")) %>%
+  distinct(v_gene_a, v_gene_b, cdr3_a, cdr3_b, cdr3_nt_a, cdr3_nt_b, hto_tag) %>% 
+  group_by(v_gene_a, v_gene_b, cdr3_a, cdr3_b) %>% 
+  summarise(n.clones = n()) %>% 
+  merge(mait.1a1b.clon %>% 
+          distinct(v_gene_a, v_gene_b, cdr3_a, cdr3_b, type)) %>% 
+  merge(fread("data/pgen_TRA.tsv") %>% 
+          select(cdr3_a = V3, pgen.TRA = V4) %>% 
+          distinct()) %>% 
+  merge(fread("data/pgen_TRB.tsv") %>% 
+          select(cdr3_b = V3, pgen.TRB = V4) %>% 
+          distinct()) %>% 
+  mutate(pgen = pgen.TRA * pgen.TRB,
+         label = paste0(cdr3_a, "_", cdr3_b))
+
+fig.pgen.clon_clonotype <- mait.1a1b.clonotypes.pgen %>% 
+  filter(type != "other") %>%
+  mutate(n.clones = ifelse(n.clones >= 2, "2+ clones per clonotype", "1 clone per clonotype")) %>% 
+  ggplot(aes(x = type, y = pgen, color = type)) +
+  geom_quasirandom() +
+  #geom_boxplot(color = "black", alpha = 0) +
+  stat_summary(fun.y = median, geom = "crossbar", width = 0.5, color = "black") +
+  scale_y_log10() +
+  facet_wrap(~n.clones) +
+  scale_color_manual(values = mait_colors) +
+  theme_bw() +
+  ylab("Pgen of clonotype (aa)") + xlab("") +
+  theme(legend.position = "none")
+
+#fig.pgen.clon_clonotype <- mait.1a1b.clonotypes.pgen %>% 
+#  ggplot(aes(x = n.clones, y = pgen, group = n.clones)) +
+#  geom_quasirandom(aes(color = type)) +
+#  geom_boxplot() +
+#  scale_y_log10() +
+#  scale_color_manual(values = mait_colors)
+
+png(file="figures/fig.pgen.clon_clonotype.png",width=6,height = 3.5, units = "in", res = 1000)
+fig.pgen.clon_clonotype
+dev.off()
+
+#mait.1a1b.clonotypes.pgen %>% 
+#  filter(n.clones == )
+#  ggplot(aes(x ))
+```
+
+```{r}
+mait.1a1b.clones %>% 
+  filter(type == "MAIT1-MAIT17")
+```
+
+
+```{r}
+mait_for_fig_clonotype <- mait.1a1b %>% 
+  mutate(label = paste0(cdr3_a, "_", cdr3_b),
+         nt_seq = paste0(cdr3_nt_a, "_", cdr3_nt_b)) %>% 
+  group_by(label) %>% 
+  mutate(total.cells = n(),
+         total.nt = length(unique(nt_seq))) %>% 
+  filter(total.cells > 2)
+
+mait_for_fig_clonotype %>% 
+  ggplot(aes(x = forcats::fct_reorder(label, total.cells, min), y = 1, fill = cell_type)) +
+  geom_bar(stat = "identity", position = position_stack(reverse = TRUE), color = "black") +
+  scale_fill_manual("MAIT subset", values = cell_type.colors) +
+  theme(aspect.ratio = 1,
+        legend.position = "rigth",
+        axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  theme_bw() +
+  scale_x_discrete(labels = NULL, breaks = NULL) +
+  xlab("Clonotype") + ylab("Cells") +
+  theme(legend.position = "bottom")
+```
+
+```{r, fig.height=.32, fig.width=12}
+mait_for_fig_clonotype %>% 
+  ggplot(aes(x = forcats::fct_reorder(label, total.cells, min), y = 1)) +
+  geom_tile(fill = "white", color = "white") +
+  geom_text(aes(label = total.nt)) 
+
+mait_for_fig_clonotype %>% 
+  ggplot(aes(x = forcats::fct_reorder(label, total.cells, min), y = 1)) +
+  geom_tile(aes(fill = factor(total.nt)), color = "black") +
+  scale_fill_manual(values = c("#58CCED", "#3895D3", "#1261A0", "#072F5F")) +
+  theme_bw()  + 
+  theme(axis.title=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank())
+
+```
+
+# Simulation - how many shared MAIT1-MAIT17 clonotypes do we expect?
+
+```{r}
+calc_number_mait1_mait17 <- function(df) {
+  df %>% 
+    select(cdr3_a, cdr3_b, cell_type) %>% 
+    mutate(mait1 = (cell_type == "MAIT1"), 
+           mait17 = (cell_type == "MAIT17")) %>% 
+    group_by(cdr3_a, cdr3_b) %>% 
+    summarise_mait() %>% 
+    group_by(type) %>% 
+    summarise(n = n())
+}
+
+mait1_mait17.simul <- c(1:1000) %>% 
+  lapply(function (x) {
+    mait.1a1b %>% 
+      ungroup() %>% 
+      mutate(cell_type = sample(cell_type)) %>% 
+      calc_number_mait1_mait17() %>% 
+      mutate(rep = x)
+  }) %>% 
+  rbindlist() 
+
+fig.mait1_mait17.simul <- mait1_mait17.simul %>% 
+  filter(type == "MAIT1-MAIT17") %>% 
+  ggplot(aes(x = n)) +
+  geom_density(fill = "#f37735") +
+  geom_vline(xintercept = 24, color = "black", linetype = "dashed", size = 1) +
+  theme_bw() +
+  xlab("# MAIT1-MAIT17 clonotypes") + ylab("Density") +
+  xlim(c(10, 80))
+
+fig.mait1_mait17.simul
+```
+
+```{r}
+png(file="figures/fig_sim_mait1_mait17.png",width=2.5,height = 2, units = "in", res = 2000)
+fig.mait1_mait17.simul
+dev.off()
+```
+
+
+# Number of clones within clonotypes for MAIT1, MAIT17 and MAIT1-MAIT17
+
+```{r, fig.width=4, fig.height=4}
+mait.1a1b %>% 
+  distinct(cdr3_a, cdr3_b, cdr3_nt_a, cdr3_nt_b, hto_tag) %>% 
+  group_by(cdr3_a, cdr3_b) %>% 
+  summarise(n.clones = n()) %>% 
+  merge(mait.1a1b.clon %>% 
+          select(cdr3_a, cdr3_b, type)) %>% 
+  group_by(type, n.clones) %>% 
+  summarise(n = n()) %>% 
+  filter(type != "other") %>% 
+  ggplot(aes(x = type, y = n, fill = factor(n.clones))) +
+  geom_bar(stat = "identity", position = "fill") +
+  theme_bw() +
+  xlab("") + ylab("fraction") +
+  scale_fill_discrete(name = "# clones within the clonotype") +
+  theme(legend.position = "bottom",
+        aspect.ratio = 1) +
+  guides(fill=guide_legend(nrow=2, byrow=TRUE))
+```
+
+
+# Number of clones within clonotypes
+
+```{r, fig.width=4, fig.height=4}
+mait.1a1b %>% 
+  distinct(cdr3_a, cdr3_b, cdr3_nt_a, cdr3_nt_b, hto_tag) %>% 
+  group_by(cdr3_a, cdr3_b) %>% 
+  summarise(n.clones = n()) %>% 
+  merge(mait.1a1b.clon %>% 
+          select(cdr3_a, cdr3_b, type)) %>% 
+  group_by(type, n.clones) %>% 
+  summarise(n = n()) %>% 
+  filter(type != "other") %>% 
+  ggplot(aes(x = type, y = n, fill = factor(n.clones))) +
+  geom_bar(stat = "identity", position = "fill") +
+  theme_bw() +
+  xlab("") + ylab("fraction") +
+  scale_fill_discrete(name = "# clones within the clonotype") +
+  theme(legend.position = "bottom",
+        aspect.ratio = 1) +
+  guides(fill=guide_legend(nrow=2, byrow=TRUE))
+```
+
+# NKT
+
+## Graph
+
+### With iNKT2
+```{r}
+library(igraph)
+
+nkt.for_graph <- fread("data/Lee2020_NKT.tsv") %>% 
+  filter(subcelltype %in% c("NKT1", "NKT2", "NKT17")) %>% 
+  mutate(cdr3_b = str_split_fixed(TRB_cdr3, "-", 2)[,1])
+  
+nkt.seqs <- nkt.for_graph$cdr3_b
+nkt.graph <- graph.empty(n = length(nkt.seqs), directed=F)
+nkt.dist <- stringdist::stringdistmatrix(nkt.seqs, nkt.seqs, method="lv")
+nkt.graph <- add.edges(nkt.graph, t(which(nkt.dist <= 1, arr.ind=T)))
+nkt.graph <- igraph::simplify(nkt.graph)
+
+nkt.colors <- nkt.for_graph %>% 
+  mutate(color = ifelse(subcelltype == "NKT17", "#d11141",
+                        ifelse(subcelltype == "NKT1", "#ffc425",
+                               ifelse(subcelltype == "NKT2", "blue", "grey")))) %>% 
+  .$color
+
+V(nkt.graph)$color <- nkt.colors
+
+
+plot(delete.vertices(simplify(nkt.graph), degree(nkt.graph)==0), vertex.size=4, vertex.label=NA, edge.color = "black")
+```
+
+### without iNKT2
+
+```{r}
+nkt.for_graph <- fread("data/Lee2020_NKT.tsv") %>% 
+  rowwise() %>% 
+  mutate(NKT1 = ("NKT1" %in% str_split_fixed(subcelltype, ",", 4)),
+         NKT17 = ("NKT17" %in% str_split_fixed(subcelltype, ",", 4))) %>% 
+  filter(NKT1 | NKT17) %>% 
+  mutate(subcelltype = ifelse(NKT1 & !NKT17, "NKT1", 
+                              ifelse(NKT17 & !NKT1, "NKT17", "NKT1-NKT17"))) %>% 
+  mutate(cdr3_b = str_split_fixed(TRB_cdr3, "-", 2)[,1])
+
+  
+nkt.seqs <- nkt.for_graph$cdr3_b
+nkt.graph <- graph.empty(n = length(nkt.seqs), directed=F)
+nkt.dist <- stringdist::stringdistmatrix(nkt.seqs, nkt.seqs, method="lv")
+nkt.graph <- add.edges(nkt.graph, t(which(nkt.dist <= 1, arr.ind=T)))
+nkt.graph <- igraph::simplify(nkt.graph)
+
+nkt.colors <- nkt.for_graph %>% 
+  mutate(color = ifelse(subcelltype == "NKT17", "#d11141",
+                        ifelse(subcelltype == "NKT1", "#ffc425", "#f37735"))) %>% 
+  .$color
+
+V(nkt.graph)$color <- nkt.colors
+
+
+plot(delete.vertices(simplify(nkt.graph), degree(nkt.graph)==0), vertex.size=8, vertex.label=NA, edge.color = "black")
+
+png(file="figures/pfig_graph_NKT_117.png",width=6.5,height = 5, units = "in", res = 2000)
+plot(delete.vertices(simplify(nkt.graph), degree(nkt.graph)==0), vertex.size=8, vertex.label=NA, edge.color = "black")
+legend("topleft", legend = c("iNKT1", "iNKT17", "iNKT1-iNKT17"), pch = 16, col = c("#ffc425", "#d11141", "#f37735"), bty = "n")
+dev.off()
+```
+
+## Simulation
+
+```{r}
+nkt.lee <- fread("data/Lee_NKT_from_raw.csv") %>% 
+  filter(cluster %in% c("NKT1", "NKT17"))
+
+nkt.sim <- c(1:1000) %>% 
+  lapply(function(x) {
+    nkt.lee %>% 
+      mutate(cluster = sample(cluster)) %>% 
+      group_by(cdr3) %>% 
+      summarise(n = length(unique(cluster))) %>% 
+      filter(n == 2) %>% 
+      mutate(replica = x) %>% 
+      group_by(replica) %>% 
+      summarise(n.nkt1nkt17 = n())
+  }) %>% 
+  rbindlist()  
+```
+
+```{r, fig.width=2.5, fig.height=3}
+fig.nkt.sim <- nkt.sim %>% 
+  ggplot(aes(x = n.nkt1nkt17)) +
+  geom_density(fill = "#f37735", bw = 2) +
+  geom_vline(xintercept = 2, color = "black", linetype = "dashed", size = 1) +
+  theme_bw() +
+  xlab("# NKT1-NKT17 clonotypes") +
+  ylab("Density") +
+  theme(axis.title.x = element_text(size = 9)) + 
+  xlim(c(0,38))
+
+png(file="figures/fig_sim_nkt.png",width=2.5,height = 2, units = "in", res = 2000)
+fig.nkt.sim
+dev.off()
+```
+
